@@ -7,7 +7,7 @@ Agent profiles for pi — preconfigured model, system prompt, tool restrictions,
 Defines named agent profiles (mirroring opencode's `agent` concept) that can be:
 - Activated on the current session: `/agent jockey`
 - Booted at startup: `PI_AGENT=reviewer pi`
-- Spawned by avenor as pi subprocesses: `avenor_spawn(agent: "reviewer", backend: "pi")`
+- Spawned by [avenor](https://github.com/sdougbrown/avenor) as pi subprocesses: `avenor_spawn(agent: "reviewer", backend: "pi")`
 
 ## Install
 
@@ -69,7 +69,7 @@ PI_AGENT=jockey pi -c
 
 When `avenor_spawn(agent: "reviewer", backend: "pi")` is called, avenor spawns `pi --mode rpc` with `PI_AGENT=reviewer`. The agents extension applies the full profile (model, systemPrompt, tools, permissions) automatically.
 
-Requires avenor with the pi backend (v0.3.3+). Model resolution falls back to `~/.pi/agent/agents.json` when the agent is not found in opencode config.
+Requires [avenor](https://github.com/sdougbrown/avenor) with the pi backend (v0.3.3+). Model resolution falls back to `~/.pi/agent/agents.json` when the agent is not found in opencode config.
 
 ## Profile vs. agent
 
@@ -79,3 +79,4 @@ Requires avenor with the pi backend (v0.3.3+). Model resolution falls back to `~
 
 - **pi** — the extension runtime
 - **avenor** — for subprocess spawning with `backend: "pi"` (optional, for sub-agent workflows)
+  - best used with `@dougbots/avenor-pi` to provide the tools to spawn those processes
