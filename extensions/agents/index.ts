@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { findCliModelOverride, parseModelSpecifier } from "./model-selection.ts";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -99,6 +99,10 @@ function checkBashPermission(
 
 export default async function (pi: ExtensionAPI) {
   const agents = loadAgentsConfig();
+  // Built-in flags are not exposed through pi.getFlag(). Avenor forwards its
+  // model option to pi as --model, so argv is the extension-level signal that
+  // the caller's model should take precedence over the profile default.
+  const cliModelOverride = findCliModelOverride(process.argv.slice(2));
   let activeAgent: { name: string; profile: AgentProfile } | null = null;
 
   /* ---- Apply agent profile to the current session ---- */
@@ -109,14 +113,23 @@ export default async function (pi: ExtensionAPI) {
       return false;
     }
 
-    // Resolve model
-    const [provider, modelId] = profile.model.split("/");
-    const model = ctx.modelRegistry.find(provider, modelId);
-    if (!model) {
-      ctx.ui.notify(`Model "${profile.model}" not found in registry`, "error");
-      return false;
+    // Explicit CLI selection wins over the profile default. This preserves
+    // `avenor_spawn(agent: ..., model: ..., backend: "pi")` overrides because
+    // Avenor forwards model to the pi subprocess as --model.
+    if (!cliModelOverride) {
+      const modelSpecifier = parseModelSpecifier(profile.model);
+      if (!modelSpecifier) {
+        ctx.ui.notify(`Invalid model "${profile.model}"; expected provider/model-id`, "error");
+        return false;
+      }
+
+      const model = ctx.modelRegistry.find(modelSpecifier.provider, modelSpecifier.modelId);
+      if (!model) {
+        ctx.ui.notify(`Model "${profile.model}" not found in registry`, "error");
+        return false;
+      }
+      await pi.setModel(model);
     }
-    await pi.setModel(model);
 
     // Thinking level
     if (profile.thinkingLevel) {

@@ -69,6 +69,19 @@ PI_AGENT=jockey pi -c
 
 When `avenor_spawn(agent: "reviewer", backend: "pi")` is called, avenor spawns `pi --mode rpc` with `PI_AGENT=reviewer`. The agents extension applies the full profile (model, systemPrompt, tools, permissions) automatically.
 
+Pass `model` as well to override only the profile's default model while retaining its prompt, tools, and permissions:
+
+```text
+avenor_spawn(
+  agent: "reviewer",
+  model: "anthropic/claude-opus-4",
+  backend: "pi",
+  prompt: "Review the outage recovery changes",
+)
+```
+
+Explicit `--model` selection takes precedence over the profile default. Avenor forwards its `model` option to the pi subprocess as `--model`, so no agent config changes are needed for a one-off override.
+
 Requires [avenor](https://github.com/sdougbrown/avenor) with the pi backend (v0.3.3+). Model resolution falls back to `~/.pi/agent/agents.json` when the agent is not found in opencode config.
 
 ## Profile vs. agent
