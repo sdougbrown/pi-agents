@@ -49,6 +49,36 @@ Profile fields:
 - `excludeTools` — denylist of tool names (removed from available set)
 - `permissions.bash` — `{ allow?: string[], deny?: string[] }` with glob patterns
 
+### Runtime agent profiles
+
+A runtime agent profile is a session-scoped overlay for role profiles. It can
+change execution settings without changing the role's system prompt, tools, or
+permission boundary. Define global profiles in `~/.pi/agent/agent-profiles.json`
+and project overrides in `.pi/agent-profiles.json`:
+
+```json
+{
+  "cloud": {
+    "description": "Temporary cloud fallbacks",
+    "agents": {
+      "explore": { "model": "sparky/deepseek-flash" },
+      "mule": { "model": "sparky/deepseek-flash" },
+      "reviewer": { "model": "sparky/deepseek-flash" }
+    }
+  }
+}
+```
+
+Only `model` and `thinkingLevel` may be overridden. Project profile entries
+merge over global entries by profile and agent name. Malformed entries are
+ignored and reported as a Pi warning. A selected profile is persisted in the Pi
+session and restored by `/resume`.
+
+`PI_AGENT_PROFILE=<name>` is an explicit launch-time override; `PROFILE=<name>`
+is accepted as a convenience alias. Both take precedence over a saved session
+selection. Explicit `--model` still takes precedence over an agent-profile's
+model.
+
 ## Commands
 
 | Command | Description |
@@ -57,12 +87,16 @@ Profile fields:
 | `/agent none` | Deactivate agent, restore all tools |
 | `/agent` | List available agents |
 | `/agents` | Same as `/agent` |
+| `/agent-profile <name>` | Select a session-scoped runtime agent profile |
+| `/agent-profile none` | Clear the session runtime agent profile |
+| `/agent-profile` | Show the active and available runtime agent profiles |
 
 ## Boot with agent
 
 ```bash
 PI_AGENT=reviewer pi
 PI_AGENT=jockey pi -c
+PI_AGENT=explore PI_AGENT_PROFILE=cloud pi
 ```
 
 ## Avenor integration

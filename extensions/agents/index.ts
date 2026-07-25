@@ -2,6 +2,13 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import {
+  executionOverride,
+  findPersistedProfileName,
+  mergeAgentProfilesConfigs,
+  type AgentProfilesConfig,
+  type ThinkingLevel,
+} from "./agent-profile.ts";
 import { findCliModelOverride, parseModelSpecifier } from "./model-selection.ts";
 
 /* ------------------------------------------------------------------ */
@@ -17,7 +24,7 @@ interface AgentProfile {
   description?: string;
   model: string;              // "provider/model-id"
   systemPrompt: string;       // inline text or "file:/absolute/path/to/prompt.md"
-  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  thinkingLevel?: ThinkingLevel;
   tools?: string[];           // allowlist — if set, only these tools are callable
   excludeTools?: string[];    // denylist — removed from available tools
   permissions?: {
@@ -30,10 +37,10 @@ interface AgentsConfig {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Config loading — merges global (~/.pi/agent/agents.json)           */
-/*  with project (.pi/agents.json), project wins.                      */
+/*  Config loading                                                     */
 /* ------------------------------------------------------------------ */
 
+/** Merge global ~/.pi/agent/agents.json with project .pi/agents.json. */
 function loadAgentsConfig(): AgentsConfig {
   const agentDir = getAgentDir();
   const globalPath = join(agentDir, "agents.json");
@@ -51,8 +58,38 @@ function loadAgentsConfig(): AgentsConfig {
       console.error(`[agents] Failed to parse ${label} agents.json (${path}):`, err);
     }
   }
-  // Later entries override earlier — project wins over global
+  // Later entries override earlier — project wins over global.
   return configs.reduce<AgentsConfig>((merged, cfg) => ({ ...merged, ...cfg }), {});
+}
+
+/**
+ * Load named runtime overlays. These can change only execution settings,
+ * leaving an agent's prompt, tools, and permission boundary authoritative.
+ */
+function loadAgentProfilesConfig(): { profiles: AgentProfilesConfig; errors: string[] } {
+  const agentDir = getAgentDir();
+  const globalPath = join(agentDir, "agent-profiles.json");
+  const projectPath = join(process.cwd(), ".pi", "agent-profiles.json");
+
+  let profiles: AgentProfilesConfig = {};
+  const errors: string[] = [];
+  for (const [label, path] of [
+    ["global", globalPath],
+    ["project", projectPath],
+  ] as const) {
+    if (!existsSync(path)) continue;
+    try {
+      const config = JSON.parse(readFileSync(path, "utf8"));
+      profiles = mergeAgentProfilesConfigs([profiles, config], (message) => {
+        errors.push(`${label} ${path}: ${message}`);
+      });
+    } catch (err) {
+      const message = `Failed to parse ${label} agent-profiles.json (${path}): ${String(err)}`;
+      console.error(`[agents] ${message}`);
+      errors.push(message);
+    }
+  }
+  return { profiles, errors };
 }
 
 function resolveSystemPrompt(raw: string): string {
@@ -82,7 +119,7 @@ function checkBashPermission(
   command: string,
 ): "allow" | "deny" {
   if (!perms) return "allow";
-  // Deny wins over allow
+  // Deny wins over allow.
   for (const pattern of perms.deny ?? []) {
     if (matchPattern(pattern, command)) return "deny";
   }
@@ -99,15 +136,62 @@ function checkBashPermission(
 
 export default async function (pi: ExtensionAPI) {
   const agents = loadAgentsConfig();
+  const { profiles: agentProfiles, errors: agentProfileConfigErrors } = loadAgentProfilesConfig();
   // Built-in flags are not exposed through pi.getFlag(). Avenor forwards its
   // model option to pi as --model, so argv is the extension-level signal that
   // the caller's model should take precedence over the profile default.
   const cliModelOverride = findCliModelOverride(process.argv.slice(2));
   let activeAgent: { name: string; profile: AgentProfile } | null = null;
+  let activeAgentProfileName: string | undefined;
+
+  function getEffectiveAgentProfile(name: string): AgentProfile | undefined {
+    const base = agents[name];
+    if (!base) return undefined;
+
+    const override = activeAgentProfileName
+      ? executionOverride(agentProfiles[activeAgentProfileName]?.agents?.[name])
+      : undefined;
+    return { ...base, ...override };
+  }
+
+  function setAgentProfileStatus(ctx: ExtensionContext) {
+    ctx.ui.setStatus(
+      "agent-profile",
+      activeAgentProfileName ? `agent-profile:${activeAgentProfileName}` : "",
+    );
+  }
+
+  /** Apply a named agent-profile, optionally saving the choice in this session. */
+  async function selectAgentProfile(
+    name: string | undefined,
+    ctx: ExtensionContext,
+    persist: boolean,
+  ): Promise<boolean> {
+    if (name && !agentProfiles[name]) {
+      ctx.ui.notify(`Agent profile "${name}" not found in agent-profiles.json`, "error");
+      return false;
+    }
+
+    const previousName = activeAgentProfileName;
+    activeAgentProfileName = name;
+    setAgentProfileStatus(ctx);
+
+    // The active role must receive a new effective model/thinking level now;
+    // future roles resolve the overlay when /agent is invoked. Do not persist
+    // a selection that cannot be applied to the current active role.
+    if (activeAgent && !(await applyAgent(activeAgent.name, ctx))) {
+      activeAgentProfileName = previousName;
+      setAgentProfileStatus(ctx);
+      return false;
+    }
+
+    if (persist) pi.appendEntry("pi-agents:profile", { name: name ?? null });
+    return true;
+  }
 
   /* ---- Apply agent profile to the current session ---- */
   async function applyAgent(name: string, ctx: ExtensionContext): Promise<boolean> {
-    const profile = agents[name];
+    const profile = getEffectiveAgentProfile(name);
     if (!profile) {
       ctx.ui.notify(`Agent "${name}" not found in agents.json`, "error");
       return false;
@@ -131,10 +215,7 @@ export default async function (pi: ExtensionAPI) {
       await pi.setModel(model);
     }
 
-    // Thinking level
-    if (profile.thinkingLevel) {
-      pi.setThinkingLevel(profile.thinkingLevel);
-    }
+    if (profile.thinkingLevel) pi.setThinkingLevel(profile.thinkingLevel);
 
     // Tool restrictions — best-effort against currently registered tools.
     // tool_call handler enforces restrictions regardless of registration timing.
@@ -142,23 +223,25 @@ export default async function (pi: ExtensionAPI) {
       const allTools = pi.getAllTools();
       let allowed: typeof allTools;
       if (profile.tools) {
-        // Allowlist: only these tool names
-        allowed = allTools.filter((t) => profile.tools!.includes(t.name));
-        // Also include any future tools whose name matches (checked at call time)
+        allowed = allTools.filter((tool) => profile.tools!.includes(tool.name));
       } else {
         allowed = [...allTools];
       }
       if (profile.excludeTools) {
-        allowed = allowed.filter((t) => !profile.excludeTools!.includes(t.name));
+        allowed = allowed.filter((tool) => !profile.excludeTools!.includes(tool.name));
       }
-      pi.setActiveTools(allowed.map((t) => t.name));
+      pi.setActiveTools(allowed.map((tool) => tool.name));
     } catch {
-      // setActiveTools may fail if called too early; tool_call gate is the fallback
+      // setActiveTools may fail if called too early; tool_call gate is the fallback.
     }
 
     activeAgent = { name, profile };
     ctx.ui.setStatus("agent", `agent:${name}`);
-    ctx.ui.notify(`Agent "${name}" active${profile.description ? ": " + profile.description : ""}`, "info");
+    const selected = activeAgentProfileName ? ` [${activeAgentProfileName}]` : "";
+    ctx.ui.notify(
+      `Agent "${name}" active${selected}${profile.description ? ": " + profile.description : ""}`,
+      "info",
+    );
     return true;
   }
 
@@ -166,44 +249,55 @@ export default async function (pi: ExtensionAPI) {
   function deactivateAgent(ctx: ExtensionContext) {
     activeAgent = null;
     try {
-      pi.setActiveTools(pi.getAllTools().map((t) => t.name));
+      pi.setActiveTools(pi.getAllTools().map((tool) => tool.name));
     } catch { /* no-op if tools not fully registered */ }
     ctx.ui.setStatus("agent", "");
     ctx.ui.notify("Agent deactivated — all tools restored", "info");
   }
 
-  /* ---- session_start: apply PI_AGENT env var ---- */
+  /* ---- session_start: restore profile, then apply PI_AGENT ---- */
   pi.on("session_start", async (_event, ctx) => {
-    const envAgent = process.env.PI_AGENT;
-    if (envAgent && agents[envAgent]) {
-      await applyAgent(envAgent, ctx);
+    if (agentProfileConfigErrors.length) {
+      ctx.ui.notify(
+        `Ignored malformed agent-profile configuration:\n${agentProfileConfigErrors.join("\n")}`,
+        "warning",
+      );
     }
+
+    // The environment is an explicit launch-time override. A persisted command
+    // selection is restored otherwise, including a saved `none` selection.
+    const environmentProfile = process.env.PI_AGENT_PROFILE ?? process.env.PROFILE;
+    const persistedProfile = findPersistedProfileName(ctx.sessionManager.getEntries());
+    const selectedProfile = environmentProfile ?? persistedProfile;
+    if (selectedProfile) await selectAgentProfile(selectedProfile, ctx, false);
+    else setAgentProfileStatus(ctx);
+
+    const envAgent = process.env.PI_AGENT;
+    if (envAgent && agents[envAgent]) await applyAgent(envAgent, ctx);
   });
 
   /* ---- before_agent_start: inject agent system prompt ---- */
   pi.on("before_agent_start", async (event, _ctx) => {
     if (!activeAgent) return undefined;
 
-    // Re-apply tool restrictions each turn (catches late-registered tools)
+    // Re-apply tool restrictions each turn (catches late-registered tools).
     try {
       const profile = activeAgent.profile;
       const allTools = pi.getAllTools();
       let allowed: typeof allTools;
       if (profile.tools) {
-        allowed = allTools.filter((t) => profile.tools.includes(t.name));
+        allowed = allTools.filter((tool) => profile.tools.includes(tool.name));
       } else {
         allowed = [...allTools];
       }
       if (profile.excludeTools) {
-        allowed = allowed.filter((t) => !profile.excludeTools.includes(t.name));
+        allowed = allowed.filter((tool) => !profile.excludeTools.includes(tool.name));
       }
-      pi.setActiveTools(allowed.map((t) => t.name));
+      pi.setActiveTools(allowed.map((tool) => tool.name));
     } catch { /* best effort */ }
 
     const agentPrompt = resolveSystemPrompt(activeAgent.profile.systemPrompt);
-    return {
-      systemPrompt: agentPrompt + "\n\n" + event.systemPrompt,
-    };
+    return { systemPrompt: agentPrompt + "\n\n" + event.systemPrompt };
   });
 
   /* ---- tool_call: enforce tool allowlist/denylist + bash permissions ---- */
@@ -211,22 +305,18 @@ export default async function (pi: ExtensionAPI) {
     if (!activeAgent) return;
     const profile = activeAgent.profile;
 
-    // Tool allowlist gate
     if (profile.tools && !profile.tools.includes(event.toolName)) {
       return { block: true, reason: `Tool "${event.toolName}" not allowed for agent "${activeAgent.name}"` };
     }
 
-    // Tool denylist gate
     if (profile.excludeTools && profile.excludeTools.includes(event.toolName)) {
       ctx.ui.notify(`Blocked tool: ${event.toolName}`, "warning");
       return { block: true, reason: `Tool "${event.toolName}" excluded for agent "${activeAgent.name}"` };
     }
 
-    // Bash permission gate
     if (event.toolName === "bash" && profile.permissions?.bash) {
       const command = (event.input as { command?: string })?.command ?? "";
-      const verdict = checkBashPermission(profile.permissions.bash, command);
-      if (verdict === "deny") {
+      if (checkBashPermission(profile.permissions.bash, command) === "deny") {
         ctx.ui.notify(`Blocked: ${command.slice(0, 80)}`, "warning");
         return { block: true, reason: `Denied by ${activeAgent.name} bash permissions` };
       }
@@ -237,12 +327,12 @@ export default async function (pi: ExtensionAPI) {
   pi.registerCommand("agent", {
     description: "Switch to an agent profile (or 'none' to deactivate)",
     getArgumentCompletions: (prefix) => {
-      const matches = Object.keys(agents).filter((n) => n.startsWith(prefix ?? ""));
+      const matches = Object.keys(agents).filter((name) => name.startsWith(prefix ?? ""));
       return matches.length
-        ? matches.map((n) => ({
-            value: n,
-            label: n,
-            description: agents[n].description ?? "",
+        ? matches.map((name) => ({
+            value: name,
+            label: name,
+            description: agents[name].description ?? "",
           }))
         : null;
     },
@@ -251,7 +341,7 @@ export default async function (pi: ExtensionAPI) {
       if (!name) {
         const current = activeAgent ? ` (active: ${activeAgent.name})` : "";
         const list = Object.entries(agents)
-          .map(([n, p]) => `  ${n}${p.description ? ": " + p.description : ""}`)
+          .map(([agentName, profile]) => `  ${agentName}${profile.description ? ": " + profile.description : ""}`)
           .join("\n");
         ctx.ui.notify(`Agent profiles${current}:\n${list}`, "info");
         return;
@@ -270,9 +360,39 @@ export default async function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const current = activeAgent ? ` [active: ${activeAgent.name}]` : "";
       const list = Object.entries(agents)
-        .map(([n, p]) => `  ${n}${p.description ? ": " + p.description : ""}`)
+        .map(([name, profile]) => `  ${name}${profile.description ? ": " + profile.description : ""}`)
         .join("\n");
       ctx.ui.notify(`Agent profiles${current}:\n${list}`, "info");
+    },
+  });
+
+  /* ---- /agent-profile <name> — select a session-scoped runtime overlay ---- */
+  pi.registerCommand("agent-profile", {
+    description: "Select a session-scoped agent runtime profile (or 'none' to clear)",
+    getArgumentCompletions: (prefix) => {
+      const names = ["none", ...Object.keys(agentProfiles)];
+      const matches = names.filter((name) => name.startsWith(prefix ?? ""));
+      return matches.length
+        ? matches.map((name) => ({
+            value: name,
+            label: name,
+            description: name === "none"
+              ? "Clear the session agent profile"
+              : agentProfiles[name]?.description ?? "",
+          }))
+        : null;
+    },
+    handler: async (args, ctx) => {
+      const name = args?.trim();
+      if (!name) {
+        const current = activeAgentProfileName ?? "none";
+        const list = Object.entries(agentProfiles)
+          .map(([profileName, profile]) => `  ${profileName}${profile.description ? ": " + profile.description : ""}`)
+          .join("\n");
+        ctx.ui.notify(`Agent runtime profiles (active: ${current})${list ? `:\n${list}` : ""}`, "info");
+        return;
+      }
+      await selectAgentProfile(name === "none" ? undefined : name, ctx, true);
     },
   });
 }
