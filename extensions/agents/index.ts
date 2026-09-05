@@ -161,6 +161,20 @@ export default async function (pi: ExtensionAPI) {
     );
   }
 
+  /**
+   * Surface the session's active agent-profile to child processes.
+   *
+   * agent-model.sh resolves a role's effective model by reading
+   * $PI_AGENT_PROFILE; absent a launch-time override, the interactive
+   * /agent-profile selection is otherwise invisible to anything pi spawns.
+   * Mirroring it into the env lets the resolver agree with the session and,
+   * since children inherit it, keeps fresh dispatches on the same profile.
+   */
+  function syncProfileEnv(name: string | undefined) {
+    if (name) process.env.PI_AGENT_PROFILE = name;
+    else delete process.env.PI_AGENT_PROFILE;
+  }
+
   /** Apply a named agent-profile, optionally saving the choice in this session. */
   async function selectAgentProfile(
     name: string | undefined,
@@ -175,6 +189,7 @@ export default async function (pi: ExtensionAPI) {
     const previousName = activeAgentProfileName;
     activeAgentProfileName = name;
     setAgentProfileStatus(ctx);
+    syncProfileEnv(name);
 
     // The active role must receive a new effective model/thinking level now;
     // future roles resolve the overlay when /agent is invoked. Do not persist
@@ -182,6 +197,7 @@ export default async function (pi: ExtensionAPI) {
     if (activeAgent && !(await applyAgent(activeAgent.name, ctx))) {
       activeAgentProfileName = previousName;
       setAgentProfileStatus(ctx);
+      syncProfileEnv(previousName);
       return false;
     }
 

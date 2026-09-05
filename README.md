@@ -79,6 +79,12 @@ is accepted as a convenience alias. Both take precedence over a saved session
 selection. Explicit `--model` still takes precedence over an agent-profile's
 model.
 
+While a session has a profile active, the extension reflects it into
+`process.env.PI_AGENT_PROFILE` (cleared on `/agent-profile none`). Child
+processes inherit it, so tooling like `agent-model.sh <role> pi` resolves the
+same model the session runs, and fresh dispatches from the session stay on the
+active profile.
+
 ## Commands
 
 | Command | Description |
