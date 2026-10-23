@@ -9,7 +9,7 @@ import {
   type AgentProfilesConfig,
   type ThinkingLevel,
 } from "./agent-profile.ts";
-import { findCliModelOverride, parseModelSpecifier } from "./model-selection.ts";
+import { findCliModelOverride, findCliThinkingOverride, parseModelSpecifier } from "./model-selection.ts";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -137,10 +137,12 @@ function checkBashPermission(
 export default async function (pi: ExtensionAPI) {
   const agents = loadAgentsConfig();
   const { profiles: agentProfiles, errors: agentProfileConfigErrors } = loadAgentProfilesConfig();
-  // Built-in flags are not exposed through pi.getFlag(). Avenor forwards its
-  // model option to pi as --model, so argv is the extension-level signal that
-  // the caller's model should take precedence over the profile default.
+  // Built-in flags are not exposed through pi.getFlag(). Avenor forwards a
+  // roster entry's model and thinking level to pi as --model and --thinking,
+  // so argv is the extension-level signal that the caller's choice should take
+  // precedence over the profile default.
   const cliModelOverride = findCliModelOverride(process.argv.slice(2));
+  const cliThinkingOverride = findCliThinkingOverride(process.argv.slice(2));
   let activeAgent: { name: string; profile: AgentProfile } | null = null;
   let activeAgentProfileName: string | undefined;
 
@@ -215,7 +217,7 @@ export default async function (pi: ExtensionAPI) {
       await pi.setModel(model);
     }
 
-    if (profile.thinkingLevel) pi.setThinkingLevel(profile.thinkingLevel);
+    if (profile.thinkingLevel && !cliThinkingOverride) pi.setThinkingLevel(profile.thinkingLevel);
 
     // Tool restrictions — best-effort against currently registered tools.
     // tool_call handler enforces restrictions regardless of registration timing.

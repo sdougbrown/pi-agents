@@ -76,8 +76,8 @@ session and restored by `/resume`.
 
 `PI_AGENT_PROFILE=<name>` is an explicit launch-time override; `PROFILE=<name>`
 is accepted as a convenience alias. Both take precedence over a saved session
-selection. Explicit `--model` still takes precedence over an agent-profile's
-model.
+selection. Explicit `--model` and `--thinking` still take precedence over an
+agent-profile's model and thinking level.
 
 ## Commands
 
@@ -114,7 +114,7 @@ avenor_spawn(
 )
 ```
 
-Explicit `--model` selection takes precedence over the profile default. Avenor forwards its `model` option to the pi subprocess as `--model`, so no agent config changes are needed for a one-off override.
+Explicit `--model` and `--thinking` selections take precedence over the profile defaults. Avenor forwards a roster entry's `model` and `thinking` to the pi subprocess as `--model` and `--thinking`, so no agent config changes are needed for a one-off override, and a roster entry that names an agent keeps its own thinking level.
 
 Requires [avenor](https://github.com/sdougbrown/avenor) with the pi backend (v0.3.3+). Model resolution falls back to `~/.pi/agent/agents.json` when the agent is not found in opencode config.
 
