@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findCliModelOverride, parseModelSpecifier } from "../extensions/agents/model-selection.ts";
+import {
+  findCliModelOverride,
+  findCliThinkingOverride,
+  parseModelSpecifier,
+} from "../extensions/agents/model-selection.ts";
 
 test("findCliModelOverride returns the model passed to pi", () => {
   assert.equal(
@@ -12,6 +16,18 @@ test("findCliModelOverride returns the model passed to pi", () => {
 test("findCliModelOverride ignores a missing --model value", () => {
   assert.equal(findCliModelOverride(["--mode", "rpc", "--model"]), undefined);
   assert.equal(findCliModelOverride(["--mode", "rpc"]), undefined);
+});
+
+test("findCliThinkingOverride returns the thinking level passed to pi", () => {
+  assert.equal(
+    findCliThinkingOverride(["--mode", "rpc", "--model", "openai-codex/gpt-6-astra", "--thinking", "high"]),
+    "high",
+  );
+});
+
+test("findCliThinkingOverride ignores a missing --thinking value", () => {
+  assert.equal(findCliThinkingOverride(["--mode", "rpc", "--thinking"]), undefined);
+  assert.equal(findCliThinkingOverride(["--mode", "rpc", "--model", "openai-codex/gpt-6-astra"]), undefined);
 });
 
 test("parseModelSpecifier preserves slashes in model IDs", () => {
